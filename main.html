@@ -1,0 +1,171 @@
+<!doctype html>
+<html>
+    <head>
+        <style>
+            table tr th,
+            table tr td {
+                padding: 0 10px;
+                border: 1px solid #DDD;
+                vertical-align: middle;
+            }
+        </style>
+    </head>
+    <body>
+        <ol>
+            <li>
+                <label for="importCsv">Select File Exported from DataLoader</label>
+                <input type="file" name="importCsv" id="importCsv" />
+            </li>
+            <li> <div>Raw:</div>
+                <pre id="rawPreview"></pre>
+            </li>
+            <li>(Optional)Preview:
+                <input type="button" id="previewCsv" value="Preview">
+                <table id="previewTbl"></table>
+            </li>
+            <li>(Optional)Convert Preview:
+                <input type="button" id="convertPreview" value="Convert">
+                <table id="convTbl"></table>
+            </li>
+            <li>(Optional)Download:
+                <input type="button" id="download" value="Download">
+            </li>
+        </ol>
+    </body>
+    <script>
+        const conf = {
+            delim : ",",
+            quot: '"',
+            escape: '"',
+            eol: '\r\n'
+        };
+
+        var ctx = {};
+
+
+        const reader = new FileReader();
+        reader.addEventListener("load", () => {
+            const csvStr = reader.result;
+            const headArray = createColumnNameArray(csvStr);
+            ctx.headArray = headArray;
+
+            const csvBody = csvStr.slice(csvStr.indexOf(conf.eol) + conf.eol.length);
+
+            // todo: state machine 
+            var rows =[];
+            var row = {};
+            var buf = [];
+            var cell = '';
+            var mode = 'CELL_LEFT';
+            var i = 0;
+            var c = 0;
+            const wSize = Math.max(3, conf.eol.length);
+            while( i <= csvBody.length ) {
+                var cur = csvBody.substr(i, wSize);
+                if(mode === 'CELL_LEFT') {
+                    if (cur[0] === conf.quot)  {
+                        mode = 'CELL_IN';
+                        i++;
+                        continue;
+                    } else if(cur.substr(0,conf.eol.length) === conf.eol ) {
+                        rows.push(row);
+                        row = {};
+                        c = 0;
+                        buf = [];
+                        i+=conf.eol.length;
+                        continue;
+                    } else { i++; continue; }
+                } else if (mode === 'CELL_RIGHT')  {
+                    if     (cur[0] === conf.delim) { mode = 'CELL_LEFT'; i++; continue;}
+                    else if(cur.substr(0,conf.eol.length) === conf.eol ) {
+                        mode = 'CELL_LEFT';
+                        rows.push(row);
+                        row = {};
+                        c = 0;
+                        buf = [];
+                        i+=conf.eol.length;
+                        continue;                        
+                    } else if (cur.substr(0,1) === '' ){
+                        rows.push(row);
+                        break;
+                    } else                           { i++; continue;}
+                } else if (mode === 'CELL_IN') {
+                    // 列値 読み込み中
+                    //   "" は " と解釈
+                    if( cur[0] === conf.escape && cur[1] === conf.quot){
+                        buf.push(conf.quot);
+                        i += 2;
+                        continue;
+                    } else if (cur[0] === conf.quot) {
+                        mode = 'CELL_RIGHT';
+                        row[headArray[c]] = buf.join("");
+                        buf = [];
+                        c++;
+                        i++;
+                        continue;
+                    } else {
+                        buf.push(cur[0]);
+                        i++;
+                        continue;
+                    }
+                }
+            }
+            ctx.rows = rows;
+            document.getElementById("rawPreview").innerText = reader.result;
+        });
+
+        document.getElementById("importCsv").addEventListener('change', (e) =>{
+            reader.readAsText(e.target.files[0], "Windows-31J");
+        }, false);
+
+
+        document.getElementById("previewCsv").addEventListener('click', (e) =>{
+            createPreviewTbl(ctx.rows, ctx.headArray);
+        }, false);
+
+        // ヘッダの抽出 全体の1行目, カラム名に区切り文字なし、改行なし の前提
+        let createColumnNameArray = (headStr) => headStr.split(conf.eol, 1)[0]
+                                                         .split(conf.delim)     // カンマは配列展開
+                                                         .map((v) => v.substring(1, v.length - 1)); //前後の引用符除去
+        let createPreviewTbl = (rows, headArray) => {
+            const tbl = document.getElementById("previewTbl");
+            while(tbl.firstChild) { tbl.removeChild(tbl.firstChild); }
+            const headerHtml = "<tr>" + headArray.map((c) => `<th>${c}</th>`).join("") + "</tr>";
+            tbl.innerHTML = headerHtml + rows.map((r) => {
+                var rowHtml = "<tr>";
+                for(let c in r) {
+                    rowHtml += `<td>${r[c]}</td>`;
+                }
+                rowHtml += "</tr>";
+                return rowHtml;
+            }).join('\r\n');            
+        };                                                 
+  
+        const converter = [
+            { name: "氏名",    builder:(row) => `${row["LASTNAME"]} ${row["FIRSTNAME"]}`},
+            { name: "役職",    builder:(row) => `${row["TITLE"]}`},
+            { name: "優先度",  builder:(row) => `${row["LEVEL__C"]}`}
+        ];
+        document.getElementById("convertPreview").addEventListener('click', (e) =>{
+
+            const tbl = document.getElementById("convTbl");
+            while(tbl.firstChild) { tbl.removeChild(tbl.firstChild); }
+
+            const headerHtml = "<tr><th>" + converter.map((conv) => conv.name).join("</th><th>") + "</th></tr>\r\n";
+            tbl.innerHTML = headerHtml + ctx.rows.map((r) => "<tr>" + converter.map((conv) => "<td>" + encodeHtmlEntity(conv.builder(r)) + "</td>").join("") + "</tr>").join('\r\n') + "</tr>";
+        }, false);
+        let encodeHtmlEntity = (string) => String(string).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\x22/g, '&quot;').replace(/\x27/g, '&#39;');
+
+        document.getElementById("download").addEventListener('click', (e) =>{
+            const converted = ctx.rows.map((r) => converter.map((conv) => "\"" + unescapeCsvCell(conv.builder(r)) + "\"").join(",")).join('\r\n');
+            console.log(converted);
+            var blob = new Blob([converted], {type: "text/plain;charset=Windows-31J"});
+            var a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.target = "_blank";
+            a.download = "export.txt"
+            a.click()
+        }, false);
+        let unescapeCsvCell = (string) => String(string).replace(/"/g, '""');
+    </script>
+</html>
